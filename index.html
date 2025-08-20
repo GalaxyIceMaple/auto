@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>甘特图（SSE 实时 + 点击更新）</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root { color-scheme: dark; }
+    body{ background:#0f172a; margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto; }
+    header{ display:flex; gap:8px; align-items:center; padding:10px 12px; background:#111827; border-bottom:1px solid #1f2937;}
+    header h1{ margin:0; font-size:16px; color:#cbd5e1; font-weight:600; letter-spacing:.5px;}
+    header .sp{ flex:1; }
+    header input[type="date"]{ background:#0b1220; color:#e5f2ff; border:1px solid #26344a; border-radius:8px; padding:6px 10px; }
+    header button{
+      background:#1e293b; color:#e2e8f0; border:1px solid #334155; border-radius:8px; padding:6px 12px;
+      cursor:pointer; transition:transform .05s ease;
+    }
+    header button:hover{ background:#243449; }
+    header button:active{ transform:scale(0.98); }
+    #main{ width:100vw; height:64vh; }
+    #stat{ padding:8px 12px; color:#cbd5e1; font-size:13px; display:flex; gap:14px; align-items:center;}
+    #stat .dot{ display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:-1px;}
+    #statusBadge{ margin-left:12px; padding:3px 8px; border-radius:999px; font-size:12px; border:1px solid #334155; background:#172133; }
+    .hint{ color:#8fb7ff; font-size:12px; opacity:.9; margin-left:10px; }
+  </style>
+  <script src="echarts.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>甘特（实时）</h1>
+    <span id="statusBadge">离线</span>
+    <span class="hint">左键点标记：切完成；Shift+点：切复核</span>
+    <div class="sp"></div>
+    <label style="color:#9fbad7;font-size:13px;margin-right:6px;">选择日期</label>
+    <input id="datePick" type="date" />
+    <button id="reloadBtn">刷新</button>
+    <button id="csvFixedBtn" title="下载固定起止 CSV">导出固定CSV</button>
+    <button id="csvStateBtn" title="下载当天状态 CSV">导出状态CSV</button>
+    <button id="alertBtn" title="查看告警">🔔 <span id="alertCount" style="padding:0 6px;border-radius:10px;background:#7f1d1d;border:1px solid #b91c1c;margin-left:6px;">0</span></button>
+  </header>
+
+  <!-- 告警侧栏 -->
+  <div id="alertDrawer" style="position:fixed;top:0;right:-420px;width:400px;height:100vh;background:#0b1220;border-left:1px solid #26344a;box-shadow:-6px 0 18px rgba(0,0,0,.35);transition:right .2s ease;z-index:9999;display:flex;flex-direction:column;">
+    <div style="padding:12px 14px;border-bottom:1px solid #1f2937;color:#e2e8f0;display:flex;gap:8px;align-items:center;">
+      <strong style="font-size:14px;">告警中心</strong>
+      <span id="alertSummary" style="margin-left:auto;color:#9fbad7;font-size:12px;"></span>
+      <button id="alertClose" style="background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:4px 8px;cursor:pointer;">关闭</button>
+    </div>
+    <div id="alertList" style="overflow:auto;flex:1;padding:8px 10px;"></div>
+  </div>
+
+  <div id="main"></div>
+  <div id="stat">
+    <span><span class="dot" style="background:#4ade80"></span>完成&复核</span>
+    <span><span class="dot" style="background:#fbbf24"></span>完成未复核</span>
+    <span><span class="dot" style="background:#38bdf8"></span>未完成已复核</span>
+    <span><span class="dot" style="background:#fb7185"></span>未完成未复核（需关注）</span>
+    <span id="statText" style="margin-left:auto;opacity:.9;"></span>
+  </div>
+
+  <script>
+  const API_BASE = 'http://127.0.0.1:5000';
+
+  function todayISO(){
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const day = String(d.getDate()).padStart(2,'0');
+    return `${y}-${m}-${day}`;
+  }
+
+  // === 外观常量（与 renderItem 保持一致） ===
+  const BAR_HEIGHT   = 15;  // 条高
+  const DOT_W        = 16;  // 横向小长条宽
+  const DOT_H        = 6;   // 横向小长条高
+  const DOT_SHIFT_X  = 20;  // 小长条距任务起点的水平偏移
+
+  // ---- 工具 ----
+  async function fetchJSON(url){
+    const r = await fetch(url);
+    if(!r.ok) throw new Error(`HTTP ${r.status} @ ${url}`);
+    return r.json();
+  }
+  const rafThrottle = (fn)=>{
+    let pend = false;
+    return (...args)=>{
+      if (pend) return;
+      pend = true;
+      requestAnimationFrame(()=>{ pend=false; fn(...args); });
+    };
+  };
+
+  // === 上证所时间标注 ===
+function sseTimeWindows(dateStr){
+  const mk = (h,m)=> new Date(`${dateStr}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00`);
+  return {
+    openCall:   [mk(9,15),  mk(9,25)],
+    contAM:     [mk(9,30),  mk(11,30)],
+    lunch:      [mk(11,30), mk(13,0)],
+    contPM:     [mk(13,0),  mk(14,57)],
+    closeCall:  [mk(14,57), mk(15,0)]
+  };
+}
+
+function fmtHM(d){ const h=String(d.getHours()).padStart(2,'0'); const m=String(d.getMinutes()).padStart(2,'0'); return `${h}:${m}`; }
+
+function sseMarkers(dateStr){
+  const w = sseTimeWindows(dateStr);
+
+  // === 每个关键时点：带 name + tooltip（鼠标移上去显示） ===
+  const pointDefs = [
+    [w.openCall[0], '开盘集合竞价开始'],
+    [w.openCall[1], '开盘集合竞价结束'],
+    [w.contAM[0],   '上午连续竞价开始'],
+    [w.contAM[1],   '上午连续竞价结束'],
+    [w.contPM[0],   '下午连续竞价开始'],
+    [w.contPM[1],   '下午连续竞价结束'],
+    [w.closeCall[1],'收盘集合竞价结束']
+  ];
+
+  const points = pointDefs.map(([t, label])=>({
+    name: label,
+    xAxis: t.getTime(),
+    // markLine 支持单点 tooltip 配置
+    tooltip: {
+      show: true,
+      formatter: `${label} ${fmtHM(t)}`
+    },
+    lineStyle: { // 也可在全局 markLine.lineStyle 统一
+      color: '#fef08a',
+      width: 2,
+      type: 'dashed',
+      opacity: 0.95
+    },
+    label: { // 线旁的小标签
+      show: true,
+      color:'#fde68a',
+      fontWeight:700,
+      fontSize:12,
+      backgroundColor:'rgba(0,0,0,0.4)',
+      borderRadius:4,
+      padding:[2,4],
+      formatter: `${label}\n${fmtHM(t)}`
+    }
+  }));
+
+  // === 时段底色（鼠标移上去显示区间名 + 时间范围） ===
+  const areas = [
+      { name:'开盘集合竞价',  range:w.openCall,  color:'rgba(34,211,238,0.18)' }, // 青
+      { name:'早市连续竞价',  range:w.contAM,    color:'rgba(59,130,246,0.10)' }, // 蓝
+      { name:'午市连续竞价',  range:w.contPM,    color:'rgba(59,130,246,0.10)' }, // 蓝
+      { name:'收盘集合竞价',  range:w.closeCall, color:'rgba(239,68,68,0.15)' }   // 红
+  ].map(a=>[{
+      name: a.name,
+      xAxis: a.range[0].getTime()
+    },{
+      xAxis: a.range[1].getTime(),
+      itemStyle:{ color:a.color },
+      tooltip: {
+        show: true,
+        formatter: `${a.name}\n${fmtHM(a.range[0])} - ${fmtHM(a.range[1])}`
+      },
+      label: { show: false }
+    }]);
+
+  return { points, areas };
+}
+
+
+  // ---- 数据容器 ----
+  let baseTasks = [];      // 固定：含 must_review
+  let stateById = {};      // 当前日期状态：{ id: {completed, reviewed} }
+  let dailyList = [];      // /api/state.list 的原始项
+  let scheduled = [];      // 已排好行
+  let idToIndex = new Map();
+  let myChart = null;
+
+  // ===== 告警：阈值（可调） =====
+  const ALERT_UPCOMING_MIN = 10 * 60 * 1000;   // 即将开始：10分钟内
+  const ALERT_OVERDUE_GRACE= 1  * 60 * 1000;   // 逾期宽限：1分钟
+  const ALERT_OVERRUN_RATE = 1.2;              // 超时：实际耗时 > 计划 * 1.2
+
+  // 告警等级与颜色
+  const ALERT_LEVEL = { info:'info', warn:'warn', crit:'crit' };
+  const ALERT_COLOR = { info:'#38bdf8', warn:'#fbbf24', crit:'#fb7185' };
+
+  // 内存
+  let alerts = [];             // {id,type,level,task_id,msg,ts,ack:false}
+  let alertsByKey = new Map(); // key 去重
+  let alertDrawerOpen = false;
+
+  // 工具
+  function makeAlertId(){ return 'A' + Math.random().toString(36).slice(2,10); }
+  function alertKeyOf(a){ return `${a.type}#${a.task_id}`; }
+  function now(){ return new Date(); }
+
+  function computeAlertsLocal(tasks){
+    const nowTs = +now();
+    const newList = [];
+    for (const t of tasks){
+      const startTs = +new Date(t.start);
+      const endTs   = +new Date(t.end);
+      const planDur = Math.max(1, endTs - startTs);
+      const runDur  = Math.max(0, nowTs - startTs);
+      const base = baseTasks.find(x=>x.id===t.id) || {};
+      const must = isMustReview(base.must_review);
+
+      if (!t.completed && startTs - nowTs <= ALERT_UPCOMING_MIN && startTs - nowTs > 0){
+        newList.push({ id: makeAlertId(), type:'upcoming', level: ALERT_LEVEL.info, task_id: t.id, msg: `【即将开始】${t.name} 预计 ${t.start}`, ts: nowTs });
+      }
+      if (!t.completed && nowTs > endTs + ALERT_OVERDUE_GRACE){
+        newList.push({ id: makeAlertId(), type:'overdue', level: ALERT_LEVEL.crit, task_id: t.id, msg: `【逾期未完成】${t.name} 计划至 ${t.end}`, ts: nowTs });
+      }
+      if (!t.completed && nowTs > startTs && runDur > planDur * ALERT_OVERRUN_RATE){
+        newList.push({ id: makeAlertId(), type:'overrun', level: ALERT_LEVEL.warn, task_id: t.id, msg: `【超时】${t.name} 已运行超阈值`, ts: nowTs });
+      }
+      if (must && t.completed && !t.reviewed){
+        newList.push({ id: makeAlertId(), type:'must_unreviewed', level: ALERT_LEVEL.warn, task_id: t.id, msg: `【必审未复核】${t.name} 已完成但未复核`, ts: nowTs });
+      }
+      if (must && nowTs > endTs && !t.reviewed){
+        newList.push({ id: makeAlertId(), type:'must_due_unreviewed', level: ALERT_LEVEL.crit, task_id: t.id, msg: `【必审到期未复核】${t.name} 已过期仍未复核`, ts: nowTs });
+      }
+    }
+    for (const a of newList){
+      const key = alertKeyOf(a);
+      const old = alertsByKey.get(key);
+      if (old && old.ack === false){
+        if (rankLevel(a.level) > rankLevel(old.level)) alertsByKey.set(key, a);
+      }else{
+        alertsByKey.set(key, a);
+      }
+    }
+    const dynamic = [];
+    for (const [, a] of alertsByKey.entries()){
+      if (a && a.ack !== true) dynamic.push(a);
+    }
+    const acked = alerts.filter(x=>x.ack===true);
+    alerts = [...dynamic, ...acked];
+    updateAlertUI();
+  }
+  function rankLevel(l){ if (l===ALERT_LEVEL.crit) return 3; if (l===ALERT_LEVEL.warn) return 2; return 1; }
+
+  const alertBtn = document.getElementById('alertBtn');
+  const alertCountEl = document.getElementById('alertCount');
+  const alertDrawer = document.getElementById('alertDrawer');
+  const alertClose = document.getElementById('alertClose');
+  const alertList = document.getElementById('alertList');
+  const alertSummary = document.getElementById('alertSummary');
+
+  function updateAlertUI(){
+    const unacked = alerts.filter(a=>!a.ack);
+    alertCountEl.textContent = String(unacked.length);
+    alertSummary.textContent = `未确认 ${unacked.length} 条 / 总 ${alerts.length}`;
+    alertList.innerHTML = unacked.map(a=>{
+      const color = ALERT_COLOR[a.level] || '#9ca3af';
+      return `
+      <div style="border:1px solid #26344a;border-radius:10px;padding:8px 10px;margin:8px 2px;background:#0f172a;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+          <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color}"></span>
+          <strong style="color:#e5e7eb;font-size:13px;">${escapeHtml(a.msg)}</strong>
+          <span style="margin-left:auto;color:#9fbad7;font-size:12px;">${new Date(a.ts).toLocaleTimeString()}</span>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button data-id="${a.id}" class="ackBtn" style="background:#1e293b;color:#e2e8f0;border:1px solid #334155;border-radius:8px;padding:4px 8px;cursor:pointer;">已知悉</button>
+          <button data-id="${a.id}" class="gotoBtn" style="background:#172133;color:#a5b4fc;border:1px solid #334155;border-radius:8px;padding:4px 8px;cursor:pointer;">定位任务</button>
+        </div>
+      </div>`;
+    }).join('');
+    alertList.querySelectorAll('.ackBtn').forEach(btn=>{
+      btn.onclick = (e)=>{
+        const id = e.currentTarget.getAttribute('data-id');
+        ackAlert(id); updateAlertUI();
+      };
+    });
+    alertList.querySelectorAll('.gotoBtn').forEach(btn=>{
+      btn.onclick = (e)=>{
+        const id = e.currentTarget.getAttribute('data-id');
+        focusTaskByAlert(id);
+      };
+    });
+  }
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
+  function ackAlert(id){
+    alerts = alerts.map(a=> a.id===id ? {...a, ack:true} : a);
+    for (const [k,v] of alertsByKey.entries()){
+      if (v && v.id===id){ alertsByKey.set(k, {...v, ack:true}); break; }
+    }
+  }
+  function focusTaskByAlert(alertId){
+    const a = alerts.find(x=>x.id===alertId); if (!a) return;
+    focusTask(a.task_id);
+    if (!alertDrawerOpen) toggleAlertDrawer(true);
+  }
+  function focusTask(taskId){
+    const idx = idToIndex.get(taskId); if (idx == null) return;
+    const t = scheduled[idx];
+    const xStart = +new Date(t.start), xEnd = +new Date(t.end);
+    const pad = (xEnd - xStart) * 2 || 10*60*1000;
+    myChart.dispatchAction({ type:'dataZoom', startValue: new Date(xStart - pad), endValue: new Date(xEnd + pad) });
+    flashTask(idx);
+  }
+  function toggleAlertDrawer(open){
+    alertDrawerOpen = (open!=null) ? open : !alertDrawerOpen;
+    alertDrawer.style.right = alertDrawerOpen ? '0' : '-420px';
+  }
+  alertBtn.onclick = ()=> toggleAlertDrawer();
+  alertClose.onclick = ()=> toggleAlertDrawer(false);
+
+  // 简易闪烁：给该任务加一次性红色外圈
+  function flashTask(index){
+    const g = makeArrows(scheduled);
+    const t = scheduled[index];
+    const x1 = myChart.convertToPixel({seriesIndex:0}, [+new Date(t.start), t.rowIndex])[0];
+    const x2 = myChart.convertToPixel({seriesIndex:0}, [+new Date(t.end),   t.rowIndex])[0];
+    const y  = myChart.convertToPixel({seriesIndex:0}, [0, t.rowIndex])[1];
+    const extra = {
+      type:'group', zlevel:40, z:9999,
+      children:[{
+        type:'rect',
+        shape:{ x:x1, y:y-BAR_HEIGHT/2-2, width:x2-x1, height:BAR_HEIGHT+4, r:12 },
+        style:{ stroke:'#fb7185', lineWidth:3, fill:'transparent', opacity:0.95 }
+      }]
+    };
+    myChart.setOption({ graphic:[...g, extra] }, { replaceMerge:['graphic'] });
+    setTimeout(()=> rebuildGraphics(), 900);
+  }
+
+  // ---- 拉固定 & 日快照 ----
+  async function loadFixed(dateStr){
+    baseTasks = await fetchJSON(`${API_BASE}/api/tasks?date=${dateStr}`);
+  }
+  async function loadSnapshot(dateStr){
+    const data = await fetchJSON(`${API_BASE}/api/state?date=${dateStr}`);
+    dailyList = data.list || [];
+    stateById = Object.fromEntries(dailyList.map(x=>[x.id, {completed:!!x.completed, reviewed:!!x.reviewed}]));
+    const s = data.stats || {};
+    document.getElementById('statText').textContent =
+      `日期：${data.date || dateStr} ｜ 任务数 ${s.total ?? 0} ｜ 完成&复核 ${s.doneReviewed ?? 0} ｜ 完成未复核 ${s.doneUnreviewed ?? 0} ｜ 未完成 ${s.undone ?? 0} ｜ 必审未完未复核 ${s.mustReviewUndone ?? 0}`;
+  }
+
+  // ---- 合并状态（不改起止） ----
+  function mergeForRender(){
+    const map = stateById;
+    return baseTasks.map(t=>{
+      const s = map[t.id] || {completed:false, reviewed:false};
+      return { ...t, completed: !!s.completed, reviewed: !!s.reviewed };
+    });
+  }
+
+  // ---- 行排布 ----
+  function assignRows(tasks){
+    const copy = tasks.slice().sort((a,b)=>+new Date(a.start)-+new Date(b.start));
+    const rows = [];
+    copy.forEach(task=>{
+      const ts = +new Date(task.start);
+      let placed = false;
+      const tryOrder = [];
+      for (let i=0;i<=rows.length;i++){
+        const up=Math.floor(rows.length/2)-i, down=Math.floor(rows.length/2)+i;
+        if (up>=0) tryOrder.push(up);
+        if (down<rows.length && down!==up) tryOrder.push(down);
+      }
+      for (const i of tryOrder){
+        if (!rows[i]) continue;
+        const last = rows[i][rows[i].length-1];
+        if (ts >= +new Date(last.end)){
+          rows[i].push(task); task.rowIndex=i; placed=true; break;
+        }
+      }
+      if (!placed){ rows.push([task]); task.rowIndex=rows.length-1; }
+    });
+    return copy;
+  }
+
+  // ---- 颜色 & 工具 ----
+  function isMustReview(v){
+    const s = String(v ?? '').trim().toLowerCase();
+    return s==='是'||s==='true'||s==='1'||s==='y'||s==='yes';
+  }
+  function getDotColor(t){
+    if (t.completed && t.reviewed) return '#4ade80';
+    if (t.completed && !t.reviewed) return '#fbbf24';
+    if (!t.completed && t.reviewed) return '#38bdf8';
+    return '#fb7185';
+  }
+function computeXRange(tasks, dateStr){
+  const dayStart = new Date(`${dateStr}T07:00:00`);
+  const dayEnd   = new Date(`${dateStr}T18:59:59`);
+  return [dayStart, dayEnd];
+}
+
+  function yAxisLabels(tasks){
+    const maxRow = Math.max(...tasks.map(t=>t.rowIndex));
+    return Array.from({length:maxRow+1},(_,i)=>`第${i+1}行`);
+  }
+
+  // ---- ECharts ----
+  function buildOption(scheduled){
+  const dateStr = (document.getElementById('datePick').value || todayISO());
+  const [xMin, xMax] = computeXRange(scheduled, dateStr);  // ← 这里传入 dateStr
+    const sm = sseMarkers(dateStr);
+    return {
+      backgroundColor:'#0f172a',
+      grid:{ left:120, right:50, top:36, bottom:30 },
+      xAxis:{
+        type:'time', min:xMin, max:xMax,
+        splitLine:{show:true, lineStyle:{color:'#26344a', type:'dashed'}},
+        axisLabel:{ color:'#e6f3ff', fontWeight:700, fontSize:13,
+          formatter:v=>echarts.format.formatTime('hh:mm', v) },
+        axisLine:{ lineStyle:{color:'#93c5fd', width:2} }
+      },
+      yAxis:{
+        type:'category', inverse:true, data: yAxisLabels(scheduled),
+        axisLine:{ show:true, lineStyle:{color:'#38bdf8', width:2} },
+        axisLabel:{ color:'#e0fffc', fontSize:13, fontWeight:700, align:'right' }
+      },
+      dataZoom:[
+        { type:'inside', xAxisIndex:0, filterMode:'none' },
+        { type:'slider', xAxisIndex:0, height:22, bottom:4 }
+      ],
+      tooltip:{
+        confine:true,
+        formatter: p=>{
+          const t = scheduled[p.dataIndex];
+          if(!t) return '';
+          const base = baseTasks.find(x=>x.id===t.id) || {};
+          return `<b>${t.name}</b><br>
+          <span style="color:#38bdf8">Start:</span> ${t.start}<br>
+          <span style="color:#38bdf8">End:&nbsp;&nbsp;</span> ${t.end}<br>
+          <span style="color:#a21caf">Must Review:</span> ${isMustReview(base.must_review)?'是':'否'}<br>
+          <span style="color:#4ade80">已完成:</span> ${t.completed?'是':'否'}<br>
+          <span style="color:#fbbf24">已复核:</span> ${t.reviewed?'是':'否'}`;
+        }
+      },
+      series:[{
+        type:'custom',
+        renderItem: (params, api)=>{
+          const t = scheduled[params.dataIndex];
+          const base = baseTasks.find(x=>x.id===t.id) || {};
+          const x1 = api.coord([+new Date(t.start), t.rowIndex])[0];
+          const x2 = api.coord([+new Date(t.end),   t.rowIndex])[0];
+          const y  = api.coord([0, t.rowIndex])[1];
+          const height = BAR_HEIGHT;
+          const dotX = x1 + DOT_SHIFT_X;
+          const textX = dotX + DOT_W/2 + 8;
+          const fillGrad = new echarts.graphic.LinearGradient(0,0,1,0,[{offset:0, color:'#38bdf8'},{offset:1, color:'#1e293b'}]);
+          const needRedRing = isMustReview(base.must_review) && !t.reviewed;
+          return {
+            type:'group',
+            children:[
+              { type:'rect', shape:{x:x1,y:y-height/2,width:x2-x1,height,r:12}, style:{fill:'#232e3f',opacity:.18} },
+              { type:'rect', shape:{x:x1,y:y-height/2,width:x2-x1,height,r:12}, style:{fill:fillGrad,shadowBlur:10,shadowColor:'#38bdf8',opacity:.97} },
+              { type:'rect', shape:{ x: dotX - DOT_W/2, y: y - DOT_H/2, width: DOT_W, height: DOT_H, r:2 },
+                style:{ fill:getDotColor(t), stroke: needRedRing ? '#fb7185' : '#ffffff', lineWidth:2, shadowBlur:needRedRing?7:3, shadowColor:needRedRing?'#fb7185':getDotColor(t)} },
+              { type:'text', style:{ text:t.name, x:textX, y:y+4, fill:'#fff', font:'bold 15px sans-serif', textAlign:'left' } }
+            ]
+          };
+        },
+        data: scheduled.map(t=>[t.start,t.end]),
+        // 关键时间点（亮黄虚线）
+        markLine:{
+          symbol:'none',
+          label:{ show:true, formatter: p=>{
+            const d = new Date(p.value);
+            const hh = String(d.getHours()).padStart(2,'0');
+            const mm = String(d.getMinutes()).padStart(2,'0');
+            return `${hh}:${mm}`;
+          }, color:'#fde68a', fontWeight:700, fontSize:11, padding:[2,4],
+          backgroundColor:'rgba(0,0,0,0.4)', borderRadius:4 },
+          lineStyle:{ color:'#fef08a', width:2, type:'dashed', opacity:0.95 },
+          data: sseMarkers(document.getElementById('datePick').value || todayISO()).points
+        },
+        // 竞价/午休时段底色（半透明）
+        markArea:{
+          silent:true,
+          itemStyle:{ color:'rgba(255,255,255,0.08)' },
+          data: sseMarkers(document.getElementById('datePick').value || todayISO()).areas
+        }
+      }],
+      graphic:[]
+    };
+  }
+
+  // 当前时间红线（置顶）
+  function makeNowGraphic(){
+    const x = myChart.convertToPixel({xAxisIndex:0}, Date.now());
+    return {
+      type: 'line',
+      silent: true,
+      zlevel: 50,
+      z: 10000,
+      shape: { x1:x, y1:0, x2:x, y2: myChart.getHeight() },
+      style: { stroke:'#ef4444', lineWidth:2.5, shadowBlur:10, shadowColor:'#ef4444', blendMode:'lighter' }
+    };
+  }
+
+  // 依赖箭头
+  function makeArrows(scheduled){
+    const arr = [];
+    scheduled.forEach(t=>{
+      const preds = Array.isArray(t.predecessor) ? t.predecessor : (t.predecessor ? [t.predecessor] : []);
+      preds.forEach((pname, idx)=>{
+        const src = scheduled.find(x=>x.name===pname);
+        if(!src) return;
+        const srcCoord = myChart.convertToPixel({seriesIndex:0}, [+new Date(src.end), src.rowIndex]);
+        const tgtCoord = myChart.convertToPixel({seriesIndex:0}, [+new Date(t.start), t.rowIndex]);
+        const srcX2 = srcCoord[0], srcY = srcCoord[1];
+        const tgtX1 = tgtCoord[0], tgtYBase = tgtCoord[1];
+        const offset = (idx - (preds.length-1)/2) * 12;
+        const tgtY = tgtYBase + offset;
+        arr.push({
+          type:'group', zlevel:30, z:1000,
+          children:[
+            { type:'polyline', shape:{ points:[[srcX2,srcY],[tgtX1-36,srcY],[tgtX1-36,tgtY],[tgtX1,tgtY]] },
+              style:{ stroke:'#fbbf24', lineWidth:3, opacity:.97 } },
+            { type:'polygon', shape:{ points:[[tgtX1,tgtY],[tgtX1-10,tgtY-7],[tgtX1-10,tgtY+7]] },
+              style:{ fill:'#fbbf24', opacity:.98 } }
+          ]
+        });
+      });
+    });
+    return arr;
+  }
+
+  // 重建顶层图形（箭头 + 现在红线）
+  function rebuildGraphics(){
+    if(!myChart) return;
+    const g = makeArrows(scheduled);
+    g.push(makeNowGraphic());
+    myChart.setOption({ graphic: g }, { replaceMerge: ['graphic'] });
+  }
+
+  // ---- 绘制 & 刷新 ----
+  function drawInitial(){
+    if(!myChart){
+      myChart = echarts.init(document.getElementById('main'));
+      myChart.on('finished', ()=> rebuildGraphics());
+      myChart.on('dataZoom', ()=> requestAnimationFrame(()=> rebuildGraphics()));
+      window.addEventListener('resize', ()=>{
+        if(!myChart) return;
+        myChart.resize();
+        requestAnimationFrame(()=> rebuildGraphics());
+      });
+    }
+    myChart.setOption( buildOption(scheduled), true );
+    setTimeout(()=> rebuildGraphics(), 0);
+  }
+
+  const refreshVisual = rafThrottle(()=>{
+    myChart.setOption( buildOption(scheduled), false, true );
+    requestAnimationFrame(()=> rebuildGraphics());
+    computeAlertsLocal(scheduled);
+  });
+
+  // ---- 点击标记 → POST 更新状态 ----
+  async function postStatus(dateStr, taskId, completed, reviewed){
+    const r = await fetch(`${API_BASE}/api/state`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ date: dateStr, task_id: taskId, completed, reviewed })
+    });
+    if(!r.ok){
+      const txt = await r.text();
+      throw new Error(`POST /api/state ${r.status} ${txt}`);
+    }
+  }
+
+  // 命中检测：横向小长条（矩形）
+  function hitDot(params){
+    const idx = params.dataIndex;
+    if (idx == null) return {hit:false};
+    const t = scheduled[idx];
+    const p1 = myChart.convertToPixel({seriesIndex:0}, [+new Date(t.start), t.rowIndex]);
+    const pY = myChart.convertToPixel({seriesIndex:0}, [0, t.rowIndex]);
+    const dotX = p1[0] + DOT_SHIFT_X;
+    const dotY = pY[1];
+    const w = DOT_W + 4, h = DOT_H + 4; // 容错
+    const mx = params.event.offsetX, my = params.event.offsetY;
+    const hit = (mx >= dotX - w/2 && mx <= dotX + w/2 && my >= dotY - h/2 && my <= dotY + h/2);
+    return {hit, task: t};
+  }
+
+  function bindDotClick(dateProvider){
+    myChart.off('click');
+    myChart.on('click', async (params)=>{
+      const {hit, task} = hitDot(params);
+      if (!hit || !task) return;
+      const dateStr = dateProvider();
+      const toggleReviewed = !!(params.event.event && params.event.event.shiftKey);
+      const newCompleted = toggleReviewed ? task.completed : !task.completed;
+      const newReviewed  = toggleReviewed ? !task.reviewed : task.reviewed;
+      try{
+        task.completed = newCompleted;
+        task.reviewed  = newReviewed;
+        stateById[task.id] = {completed:newCompleted, reviewed:newReviewed};
+        refreshVisual();
+        await postStatus(dateStr, task.id, newCompleted, newReviewed);
+      }catch(e){
+        console.error(e);
+        task.completed = !newCompleted;
+        task.reviewed  = !newReviewed;
+        stateById[task.id] = {completed:task.completed, reviewed:task.reviewed};
+        refreshVisual();
+        alert('更新失败：' + e.message);
+      }
+    });
+  }
+
+  // ---- SSE 实时（含重连） ----
+  let es = null;
+  let reconnectAttempt = 0;
+  const statusBadge = document.getElementById('statusBadge');
+
+  function setOnline(on){
+    statusBadge.textContent = on ? '在线' : '离线';
+    statusBadge.style.background = on ? '#0b3a2e' : '#3a1010';
+    statusBadge.style.borderColor = on ? '#1b8a6b' : '#7a2b2b';
+  }
+  function connectSSE(dateStr){
+    closeSSE();
+    setOnline(false);
+    const url = `${API_BASE}/api/state/stream?date=${encodeURIComponent(dateStr)}`;
+    es = new EventSource(url);
+    es.onopen = ()=>{ reconnectAttempt = 0; setOnline(true); };
+    es.onmessage = (e)=>{
+      try{
+        const ev = JSON.parse(e.data || '{}');
+        if (ev.date !== dateStr) return;
+        const changes = ev.changes || [];
+        for (const c of changes){
+          const idx = idToIndex.get(c.task_id);
+          if (idx==null) continue;
+          const t = scheduled[idx];
+          t.completed = !!c.completed;
+          t.reviewed  = !!c.reviewed;
+          stateById[c.task_id] = {completed:t.completed, reviewed:t.reviewed};
+        }
+        refreshVisual();
+      }catch(err){ /* ignore */ }
+    };
+    es.onerror = ()=>{
+      setOnline(false);
+      reconnectAttempt++;
+      const delay = Math.min(15000, 500 * Math.pow(2, reconnectAttempt));
+      setTimeout(()=> connectSSE(dateStr), delay);
+    };
+  }
+  function closeSSE(){
+    if (es){ try{ es.close(); }catch{} es=null; }
+  }
+
+  // ---- 交互 ----
+  const datePick = document.getElementById('datePick');
+  const reloadBtn = document.getElementById('reloadBtn');
+  const csvFixedBtn = document.getElementById('csvFixedBtn');
+  const csvStateBtn = document.getElementById('csvStateBtn');
+
+  async function bootFor(dateStr){
+    await loadFixed(dateStr);
+    await loadSnapshot(dateStr);
+    scheduled = assignRows( mergeForRender() );
+    idToIndex = new Map(scheduled.map((t,i)=>[t.id, i]));
+    drawInitial();
+    bindDotClick(()=> (datePick.value || dateStr));
+    connectSSE(dateStr);
+    computeAlertsLocal(scheduled);
+  }
+
+  reloadBtn.addEventListener('click', ()=>{
+    closeSSE();
+    bootFor(datePick.value || todayISO()).catch(err=>{
+      console.error(err); alert('加载失败，请确认后端在线。');
+    });
+  });
+  datePick.addEventListener('change', ()=>{
+    closeSSE();
+    bootFor(datePick.value || todayISO()).catch(err=>{
+      console.error(err); alert('加载失败，请确认后端在线。');
+    });
+  });
+  csvFixedBtn.addEventListener('click', ()=> window.open(`${API_BASE}/api/export/fixed.csv`,'_blank'));
+  csvStateBtn.addEventListener('click', ()=>{
+    const d = datePick.value || todayISO();
+    window.open(`${API_BASE}/api/export/state.csv?date=${d}`,'_blank');
+  });
+
+  // ---- 启动 ----
+  (async ()=>{
+    try{
+      await bootFor(datePick.value || todayISO());
+      datePick.value = todayISO();
+    }catch(err){
+      console.error(err);
+      alert('初始化失败：请确保通过 http(s) 访问本页，且后端已启动。');
+    }
+  })();
+
+  // 每 60 秒移动“现在时间线”
+  setInterval(()=> rebuildGraphics(), 60000);
+  </script>
+</body>
+</html>
