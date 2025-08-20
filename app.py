@@ -10,7 +10,6 @@ from zoneinfo import ZoneInfo  # Python 3.9+
 DB = "gantt.db"
 TZ = ZoneInfo("Asia/Singapore")
 
-
 app = Flask(__name__)
 CORS(app)
 
