@@ -34,8 +34,6 @@
     <label style="color:#9fbad7;font-size:13px;margin-right:6px;">选择日期</label>
     <input id="datePick" type="date" />
     <button id="reloadBtn">刷新</button>
-    <button id="csvFixedBtn" title="下载固定起止 CSV">导出固定CSV</button>
-    <button id="csvStateBtn" title="下载当天状态 CSV">导出状态CSV</button>
     <button id="alertBtn" title="查看告警">🔔 <span id="alertCount" style="padding:0 6px;border-radius:10px;background:#7f1d1d;border:1px solid #b91c1c;margin-left:6px;">0</span></button>
   </header>
 
@@ -107,7 +105,7 @@ function fmtHM(d){ const h=String(d.getHours()).padStart(2,'0'); const m=String(
 function sseMarkers(dateStr){
   const w = sseTimeWindows(dateStr);
 
-  // === 每个关键时点：带 name + tooltip（鼠标移上去显示） ===
+  // === 每个关键时点：带 name + tooltip ===
   const pointDefs = [
     [w.openCall[0], '开盘集合竞价开始'],
     [w.openCall[1], '开盘集合竞价结束'],
@@ -121,45 +119,23 @@ function sseMarkers(dateStr){
   const points = pointDefs.map(([t, label])=>({
     name: label,
     xAxis: t.getTime(),
-    // markLine 支持单点 tooltip 配置
-    tooltip: {
-      show: true,
-      formatter: `${label} ${fmtHM(t)}`
-    },
-    lineStyle: { // 也可在全局 markLine.lineStyle 统一
-      color: '#fef08a',
-      width: 2,
-      type: 'dashed',
-      opacity: 0.95
-    },
-    label: { // 线旁的小标签
-      show: true,
-      color:'#fde68a',
-      fontWeight:700,
-      fontSize:12,
-      backgroundColor:'rgba(0,0,0,0.4)',
-      borderRadius:4,
-      padding:[2,4],
-      formatter: `${label}\n${fmtHM(t)}`
-    }
+    tooltip: { show: true, formatter: `${label} ${fmtHM(t)}` },
+    lineStyle: { color: '#fef08a', width: 2, type: 'dashed', opacity: 0.95 },
+    label: { show: true, color:'#fde68a', fontWeight:700, fontSize:12, backgroundColor:'rgba(0,0,0,0.4)', borderRadius:4, padding:[2,4], formatter: `${label}\n${fmtHM(t)}` }
   }));
 
   // === 时段底色（鼠标移上去显示区间名 + 时间范围） ===
   const areas = [
-      { name:'开盘集合竞价',  range:w.openCall,  color:'rgba(34,211,238,0.18)' }, // 青
-      { name:'早市连续竞价',  range:w.contAM,    color:'rgba(59,130,246,0.10)' }, // 蓝
-      { name:'午市连续竞价',  range:w.contPM,    color:'rgba(59,130,246,0.10)' }, // 蓝
-      { name:'收盘集合竞价',  range:w.closeCall, color:'rgba(239,68,68,0.15)' }   // 红
+      { name:'开盘集合竞价',  range:w.openCall,  color:'rgba(34,211,238,0.18)' },
+      { name:'早市连续竞价',  range:w.contAM,    color:'rgba(59,130,246,0.10)' },
+      { name:'午市连续竞价',  range:w.contPM,    color:'rgba(59,130,246,0.10)' },
+      { name:'收盘集合竞价',  range:w.closeCall, color:'rgba(239,68,68,0.15)' }
   ].map(a=>[{
-      name: a.name,
-      xAxis: a.range[0].getTime()
+      name: a.name, xAxis: a.range[0].getTime()
     },{
       xAxis: a.range[1].getTime(),
       itemStyle:{ color:a.color },
-      tooltip: {
-        show: true,
-        formatter: `${a.name}\n${fmtHM(a.range[0])} - ${fmtHM(a.range[1])}`
-      },
+      tooltip: { show: true, formatter: `${a.name}\n${fmtHM(a.range[0])} - ${fmtHM(a.range[1])}` },
       label: { show: false }
     }]);
 
@@ -652,8 +628,6 @@ function computeXRange(tasks, dateStr){
   // ---- 交互 ----
   const datePick = document.getElementById('datePick');
   const reloadBtn = document.getElementById('reloadBtn');
-  const csvFixedBtn = document.getElementById('csvFixedBtn');
-  const csvStateBtn = document.getElementById('csvStateBtn');
 
   async function bootFor(dateStr){
     await loadFixed(dateStr);
@@ -677,11 +651,6 @@ function computeXRange(tasks, dateStr){
     bootFor(datePick.value || todayISO()).catch(err=>{
       console.error(err); alert('加载失败，请确认后端在线。');
     });
-  });
-  csvFixedBtn.addEventListener('click', ()=> window.open(`${API_BASE}/api/export/fixed.csv`,'_blank'));
-  csvStateBtn.addEventListener('click', ()=>{
-    const d = datePick.value || todayISO();
-    window.open(`${API_BASE}/api/export/state.csv?date=${d}`,'_blank');
   });
 
   // ---- 启动 ----
