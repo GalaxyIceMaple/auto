@@ -406,20 +406,43 @@ function computeXRange(tasks, dateStr){
         { type:'inside', xAxisIndex:0, filterMode:'none' },
         { type:'slider', xAxisIndex:0, height:22, bottom:4 }
       ],
-      tooltip:{
-        confine:true,
-        formatter: p=>{
-          const t = scheduled[p.dataIndex];
-          if(!t) return '';
-          const base = baseTasks.find(x=>x.id===t.id) || {};
-          return `<b>${t.name}</b><br>
-          <span style="color:#38bdf8">Start:</span> ${t.start}<br>
-          <span style="color:#38bdf8">End:&nbsp;&nbsp;</span> ${t.end}<br>
-          <span style="color:#a21caf">Must Review:</span> ${isMustReview(base.must_review)?'是':'否'}<br>
-          <span style="color:#4ade80">已完成:</span> ${t.completed?'是':'否'}<br>
-          <span style="color:#fbbf24">已复核:</span> ${t.reviewed?'是':'否'}`;
-        }
-      },
+tooltip:{
+  confine:true,
+  formatter: p=>{
+    const t = scheduled[p.dataIndex];
+    if(!t) return '';
+
+    // 细节字段优先级：任务实例 → 基础任务
+    const base = baseTasks.find(x=>x.id===t.id) || {};
+    const details = (t.details ?? base.details ?? base.detail ?? base.desc ?? '').toString().trim();
+
+    // 进度（如果你前面加了 getProgressPercent，可以一起用）
+    const percent = (typeof getProgressPercent === 'function')
+      ? Math.round(getProgressPercent(t) * 100)
+      : '';
+
+    // 时长（可选：保留/删除均可）
+    const start = new Date(t.start);
+    const end   = new Date(t.end);
+    const durMin = Math.max(1, Math.round((end - start)/60000));
+
+    // 只显示 details；标题+时间作为辅助
+    return `
+      <div style="min-width:240px">
+        <div style="font-weight:700;margin-bottom:6px">${escapeHtml(t.name)}</div>
+        <div style="color:#9fbad7;font-size:12px;margin-bottom:6px">
+          ${start.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+          – ${end.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
+          · ${durMin} 分钟
+          ${percent!=='' ? ` · ${percent}%` : ''}
+        </div>
+        <div style="line-height:1.4;white-space:pre-wrap">
+          ${details ? escapeHtml(details) : '<span style="opacity:.7">（无详情）</span>'}
+        </div>
+      </div>`;
+  }
+}
+,
       series:[{
         type:'custom',
         renderItem: (params, api)=>{
@@ -440,7 +463,7 @@ function computeXRange(tasks, dateStr){
               { type:'rect', shape:{x:x1,y:y-height/2,width:x2-x1,height,r:12}, style:{fill:fillGrad,shadowBlur:10,shadowColor:'#38bdf8',opacity:.97} },
               { type:'rect', shape:{ x: dotX - DOT_W/2, y: y - DOT_H/2, width: DOT_W, height: DOT_H, r:4 },
                 style:{ fill:getDotColor(t), stroke: needRedRing ? '#fb7185' : '#ffffff', lineWidth:2, shadowBlur:needRedRing?7:3, shadowColor:needRedRing?'#fb7185':getDotColor(t)} },
-              { type:'text', style:{ text:t.name, x:textX, y:y+4, fill:'#fff', font:'bold 15px sans-serif', textAlign:'left' } }
+              { type:'text', style:{ text:t.name, x:textX, y:y-6, fill:'#fff', font:'bold 15px sans-serif', textAlign:'left' } }
             ]
           };
         },
