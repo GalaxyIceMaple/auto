@@ -323,30 +323,42 @@ function sseMarkers(dateStr){
     });
   }
 
-  // ---- 行排布 ----
-  function assignRows(tasks){
-    const copy = tasks.slice().sort((a,b)=>+new Date(a.start)-+new Date(b.start));
-    const rows = [];
-    copy.forEach(task=>{
-      const ts = +new Date(task.start);
-      let placed = false;
-      const tryOrder = [];
-      for (let i=0;i<=rows.length;i++){
-        const up=Math.floor(rows.length/2)-i, down=Math.floor(rows.length/2)+i;
-        if (up>=0) tryOrder.push(up);
-        if (down<rows.length && down!==up) tryOrder.push(down);
+// ---- 行排布 ----
+function assignRows(tasks){
+  const copy = tasks.slice().sort((a,b)=>+new Date(a.start)-+new Date(b.start));
+  const rows = [];
+  const ONE_HOUR = 60 * 60 * 1000;
+
+  copy.forEach(task=>{
+    const ts = +new Date(task.start);
+    let placed = false;
+
+    for (let i=0;i<rows.length;i++){
+      const last = rows[i][rows[i].length-1];
+      const lastEnd = +new Date(last.end);
+
+      // ✅ 1. 时间不重叠
+      const noOverlap = ts >= lastEnd;
+      // ✅ 2. 与上一个任务间隔至少 1 小时
+      const spacedEnough = ts - lastEnd >= ONE_HOUR;
+
+      if (noOverlap && spacedEnough){
+        rows[i].push(task);
+        task.rowIndex = i;
+        placed = true;
+        break;
       }
-      for (const i of tryOrder){
-        if (!rows[i]) continue;
-        const last = rows[i][rows[i].length-1];
-        if (ts >= +new Date(last.end)){
-          rows[i].push(task); task.rowIndex=i; placed=true; break;
-        }
-      }
-      if (!placed){ rows.push([task]); task.rowIndex=rows.length-1; }
-    });
-    return copy;
-  }
+    }
+
+    if (!placed){
+      rows.push([task]);
+      task.rowIndex = rows.length-1;
+    }
+  });
+
+  return copy;
+}
+
 
   // ---- 颜色 & 工具 ----
   function isMustReview(v){
@@ -377,7 +389,7 @@ function computeXRange(tasks, dateStr){
     const sm = sseMarkers(dateStr);
     return {
       backgroundColor:'#0f172a',
-      grid:{ left:120, right:50, top:36, bottom:30 },
+      grid:{ left:50, right:50, top:36, bottom:30 },
       xAxis:{
         type:'time', min:xMin, max:xMax,
         splitLine:{show:true, lineStyle:{color:'#26344a', type:'dashed'}},
@@ -387,8 +399,8 @@ function computeXRange(tasks, dateStr){
       },
       yAxis:{
         type:'category', inverse:true, data: yAxisLabels(scheduled),
-        axisLine:{ show:true, lineStyle:{color:'#38bdf8', width:2} },
-        axisLabel:{ color:'#e0fffc', fontSize:13, fontWeight:700, align:'right' }
+        axisLine:{ show:false },
+        axisLabel:{ show:false }
       },
       dataZoom:[
         { type:'inside', xAxisIndex:0, filterMode:'none' },
@@ -471,32 +483,98 @@ function computeXRange(tasks, dateStr){
   }
 
   // 依赖箭头
-  function makeArrows(scheduled){
-    const arr = [];
-    scheduled.forEach(t=>{
-      const preds = Array.isArray(t.predecessor) ? t.predecessor : (t.predecessor ? [t.predecessor] : []);
-      preds.forEach((pname, idx)=>{
-        const src = scheduled.find(x=>x.name===pname);
-        if(!src) return;
-        const srcCoord = myChart.convertToPixel({seriesIndex:0}, [+new Date(src.end), src.rowIndex]);
-        const tgtCoord = myChart.convertToPixel({seriesIndex:0}, [+new Date(t.start), t.rowIndex]);
-        const srcX2 = srcCoord[0], srcY = srcCoord[1];
-        const tgtX1 = tgtCoord[0], tgtYBase = tgtCoord[1];
-        const offset = (idx - (preds.length-1)/2) * 12;
-        const tgtY = tgtYBase + offset;
-        arr.push({
-          type:'group', zlevel:30, z:1000,
-          children:[
-            { type:'polyline', shape:{ points:[[srcX2,srcY],[tgtX1-36,srcY],[tgtX1-36,tgtY],[tgtX1,tgtY]] },
-              style:{ stroke:'#fbbf24', lineWidth:3, opacity:.97 } },
-            { type:'polygon', shape:{ points:[[tgtX1,tgtY],[tgtX1-10,tgtY-7],[tgtX1-10,tgtY+7]] },
-              style:{ fill:'#fbbf24', opacity:.98 } }
-          ]
-        });
+// ===== 美观直线箭头样式 =====
+const ARROW_COLOR = '#fbbf24';
+const ARROW_WIDTH = 2.5;       // 线宽
+const ARROW_GLOW  = 8;         // 发光
+const ARROW_SIZE  = 11;        // 三角箭头尺寸
+const ARROW_ALPHA = 0.95;      // 透明度
+const ARROW_PARALLEL_OFFSET = 12; // 多依赖时的平行错位像素（0 = 关闭）
+
+function lineAngle(x1,y1,x2,y2){
+  return Math.atan2(y2 - y1, x2 - x1);
+}
+function triPoints(x,y,angle,size){
+  // 三角箭头（以 (x,y) 为尖端，沿 angle 方向）
+  const cos = Math.cos(angle), sin = Math.sin(angle);
+  const backX = x - cos * size, backY = y - sin * size;
+  const wing = size * 0.6;
+  // 垂直向左右展开
+  const wx = -sin * wing, wy = cos * wing;
+  return [
+    [x, y],
+    [backX + wx, backY + wy],
+    [backX - wx, backY - wy]
+  ];
+}
+
+function makeArrows(scheduled){
+  const arr = [];
+  scheduled.forEach(t=>{
+    const preds = Array.isArray(t.predecessor) ? t.predecessor : (t.predecessor ? [t.predecessor] : []);
+    preds.forEach((pname, idx)=>{
+      const src = scheduled.find(x=>x.name===pname);
+      if(!src) return;
+
+      // 起终点像素坐标（尾→头）
+      const [srcX2, srcY] = myChart.convertToPixel({seriesIndex:0}, [+new Date(src.end), src.rowIndex]);
+      const [tgtX1, tgtY] = myChart.convertToPixel({seriesIndex:0}, [+new Date(t.start), t.rowIndex]);
+
+      // —— 可选：平行位移，避免多条线完全重叠（仍保持直线，不拐）——
+      let X1 = srcX2, Y1 = srcY, X2 = tgtX1, Y2 = tgtY;
+      if (ARROW_PARALLEL_OFFSET && preds.length > 1){
+        const dx = X2 - X1, dy = Y2 - Y1;
+        const len = Math.hypot(dx, dy) || 1;
+        // 垂线单位向量
+        const nx = -dy / len, ny = dx / len;
+        const off = (idx - (preds.length - 1)/2) * ARROW_PARALLEL_OFFSET;
+        X1 += nx * off;  Y1 += ny * off;
+        X2 += nx * off;  Y2 += ny * off;
+      }
+
+      const ang = lineAngle(X1, Y1, X2, Y2);
+      const head = triPoints(X2, Y2, ang, ARROW_SIZE);
+
+      arr.push({
+        type:'group', zlevel:30, z:1000,
+        children:[
+          // 起点柔和圆点
+          {
+            type:'circle',
+            shape:{ cx:X1, cy:Y1, r:3.5 },
+            style:{ fill:ARROW_COLOR, opacity:0.45 }
+          },
+          // 直线（圆头、发光）
+          {
+            type:'line',
+            shape:{ x1:X1, y1:Y1, x2:X2, y2:Y2 },
+            style:{
+              stroke: ARROW_COLOR,
+              lineWidth: ARROW_WIDTH,
+              lineCap: 'round',
+              opacity: ARROW_ALPHA,
+              shadowBlur: ARROW_GLOW,
+              shadowColor: ARROW_COLOR
+            }
+          },
+          // 箭头：实心 + 细描边（更锐利）
+          {
+            type:'polygon',
+            shape:{ points: head },
+            style:{
+              fill: ARROW_COLOR,
+              stroke: '#0f172a',     // 与背景相近的细描边，干净利落
+              lineWidth: 0.8,
+              opacity: ARROW_ALPHA
+            }
+          }
+        ]
       });
     });
-    return arr;
-  }
+  });
+  return arr;
+}
+
 
   // 重建顶层图形（箭头 + 现在红线）
   function rebuildGraphics(){
