@@ -67,36 +67,6 @@ def init_db():
         )""")
         con.commit()
 
-def seed_if_empty():
-    with get_conn() as con:
-        cur = con.cursor()
-        cur.execute("SELECT COUNT(*) FROM tasks")
-        if cur.fetchone()[0] == 0:
-            # 注意：这里的日期无所谓，都是模板，会在返回时投影为请求的日期
-            sample = [
-                (1,'T1','2024-08-06 08:00','2024-08-06 09:00', json.dumps([]), '否'),
-                (2,'T2','2024-08-06 08:10','2024-08-06 08:45', json.dumps([]), '否'),
-                (3,'T3','2024-08-06 08:15','2024-08-06 08:55', json.dumps([]), '是'),
-                (4,'T4','2024-08-06 09:20','2024-08-06 09:50', json.dumps(["T1","T3","T2"]), '否'),
-                (5,'T5','2024-08-06 10:00','2024-08-06 10:40', json.dumps(["T4"]), '是'),
-            ]
-            cur.executemany(
-                "INSERT INTO tasks(id,name,start,end,predecessor,must_review) VALUES (?,?,?,?,?,?)",
-                sample
-            )
-            # 给一个示例日的状态（随便哪天）
-            cur.executemany("""
-            INSERT OR REPLACE INTO task_state(date,task_id,completed,reviewed)
-            VALUES (?,?,?,?)
-            """, [
-                ('2024-08-06',1,1,1),
-                ('2024-08-06',2,1,0),
-                ('2024-08-06',3,0,0),
-                ('2024-08-06',4,1,1),
-                ('2024-08-06',5,0,0),
-            ])
-            con.commit()
-
 # ---------- SSE ----------
 def broadcast(ev: dict):
     with lst_lock:
