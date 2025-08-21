@@ -224,5 +224,4 @@ def export_state():
 
 if __name__ == "__main__":
     init_db()
-    seed_if_empty()
     app.run(host="0.0.0.0", port=5000, threaded=True, debug=True, use_reloader=False)
