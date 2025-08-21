@@ -69,9 +69,9 @@
 
   // === 外观常量（与 renderItem 保持一致） ===
   const BAR_HEIGHT   = 15;  // 条高
-  const DOT_W        = 16;  // 横向小长条宽
-  const DOT_H        = 6;   // 横向小长条高
-  const DOT_SHIFT_X  = 20;  // 小长条距任务起点的水平偏移
+  const DOT_W        = 8;  // 小长条宽
+  const DOT_H        = 10;   // 小长条高
+  const DOT_SHIFT_X  = 5;  // 小长条距任务起点的水平偏移
 
   // ---- 工具 ----
   async function fetchJSON(url){
@@ -431,14 +431,14 @@ function computeXRange(tasks, dateStr){
           const height = BAR_HEIGHT;
           const dotX = x1 + DOT_SHIFT_X;
           const textX = dotX + DOT_W/2 + 8;
-          const fillGrad = new echarts.graphic.LinearGradient(0,0,1,0,[{offset:0, color:'#38bdf8'},{offset:1, color:'#1e293b'}]);
+          const fillGrad = new echarts.graphic.LinearGradient(0,0,1,0,[{offset:0, color:'#3b82f6'},{offset:1, color:'#1e40af'}]);
           const needRedRing = isMustReview(base.must_review) && !t.reviewed;
           return {
             type:'group',
             children:[
               { type:'rect', shape:{x:x1,y:y-height/2,width:x2-x1,height,r:12}, style:{fill:'#232e3f',opacity:.18} },
               { type:'rect', shape:{x:x1,y:y-height/2,width:x2-x1,height,r:12}, style:{fill:fillGrad,shadowBlur:10,shadowColor:'#38bdf8',opacity:.97} },
-              { type:'rect', shape:{ x: dotX - DOT_W/2, y: y - DOT_H/2, width: DOT_W, height: DOT_H, r:2 },
+              { type:'rect', shape:{ x: dotX - DOT_W/2, y: y - DOT_H/2, width: DOT_W, height: DOT_H, r:4 },
                 style:{ fill:getDotColor(t), stroke: needRedRing ? '#fb7185' : '#ffffff', lineWidth:2, shadowBlur:needRedRing?7:3, shadowColor:needRedRing?'#fb7185':getDotColor(t)} },
               { type:'text', style:{ text:t.name, x:textX, y:y+4, fill:'#fff', font:'bold 15px sans-serif', textAlign:'left' } }
             ]
