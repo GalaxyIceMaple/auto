@@ -114,11 +114,11 @@ def api_tasks():
     req_date = request.args.get("date") or today_str()
     with get_conn() as con:
         cur = con.cursor()
-        cur.execute("SELECT id,name,start,end,predecessor,must_review FROM tasks ORDER BY id")
+        cur.execute("SELECT id,name,start,end,predecessor,must_review,details FROM tasks ORDER BY id")
         rows = cur.fetchall()
 
     out = []
-    for id_, name, start, end, predecessor, mr in rows:
+    for id_, name, start, end, predecessor, mr, details in rows:
         start2 = replace_date_part(start, req_date)
         end2   = replace_date_part(end,   req_date)
         try:
@@ -131,7 +131,9 @@ def api_tasks():
             "start": start2,
             "end": end2,
             "predecessor": pred,
-            "must_review": mr
+            "must_review": mr ,
+            "details": details,
+
         })
     return jsonify(out)
 

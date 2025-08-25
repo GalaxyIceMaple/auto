@@ -434,11 +434,11 @@ tooltip:{
           ${start.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
           – ${end.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
           · ${durMin} 分钟
-          ${percent!=='' ? ` · ${percent}%` : ''}
+        ${percent!=='' ? ` · ${percent}%` : ''}
         </div>
-        <div style="line-height:1.4;white-space:pre-wrap">
-          ${details ? escapeHtml(details) : '<span style="opacity:.7">（无详情）</span>'}
-        </div>
+<div style="line-height:0.6;white-space:pre-wrap; padding-right:12px; border-left:2px solid #334155; margin-top:-0px;">
+  ${details ? escapeHtml(details) : '<span style="opacity:.7">（无详情）</span>'}
+</div>
       </div>`;
   }
 }
