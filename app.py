@@ -110,7 +110,7 @@ def index_page():
 
 @app.get("/api/tasks")
 def api_tasks():
-    # 带 date 参数；不传则用新加坡“今天”
+    # 带 date 参数；不传则用“今天”
     req_date = request.args.get("date") or today_str()
     with get_conn() as con:
         cur = con.cursor()
@@ -192,37 +192,6 @@ def api_state_post():
     }], "seq": int(time.time()*1000)}
     broadcast(ev)
     return jsonify({"ok":True})
-
-#（可选）导出 CSV
-@app.get("/api/export/fixed.csv")
-def export_fixed():
-    with get_conn() as con:
-        cur = con.cursor()
-        cur.execute("SELECT id,name,start,end,predecessor,must_review FROM tasks ORDER BY id")
-        rows = cur.fetchall()
-    buf = io.StringIO(); w = csv.writer(buf)
-    w.writerow(["id","name","start","end","predecessor","must_review"])
-    for r in rows: w.writerow(r)
-    out = buf.getvalue()
-    return Response(out, mimetype="text/csv",
-                    headers={"Content-Disposition":"attachment; filename=fixed_tasks.csv"})
-
-@app.get("/api/export/state.csv")
-def export_state():
-    date = request.args.get("date") or today_str()
-    with get_conn() as con:
-        cur = con.cursor()
-        cur.execute("""
-        SELECT task_id, completed, reviewed
-        FROM task_state WHERE date=? ORDER BY task_id
-        """, (date,))
-        rows = cur.fetchall()
-    buf = io.StringIO(); w = csv.writer(buf)
-    w.writerow(["date","task_id","completed","reviewed"])
-    for r in rows: w.writerow([date, r[0], r[1], r[2]])
-    out = buf.getvalue()
-    return Response(out, mimetype="text/csv",
-                    headers={"Content-Disposition":f"attachment; filename=state_{date}.csv"})
 
 if __name__ == "__main__":
     init_db()

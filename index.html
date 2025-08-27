@@ -327,7 +327,7 @@ function sseMarkers(dateStr){
 function assignRows(tasks){
   const copy = tasks.slice().sort((a,b)=>+new Date(a.start)-+new Date(b.start));
   const rows = [];
-  const ONE_HOUR = 60 * 60 * 1000;
+  const ONE_HOUR = 50 * 60 * 1000;
 
   copy.forEach(task=>{
     const ts = +new Date(task.start);
@@ -341,8 +341,12 @@ function assignRows(tasks){
       const noOverlap = ts >= lastEnd;
       // ✅ 2. 与上一个任务间隔至少 1 小时
       const spacedEnough = ts - lastEnd >= ONE_HOUR;
+      // ✅ 3. 得到整数小时槽
+      const startSlot = Math.floor(ts / ONE_HOUR);            // 任务开始所在小时槽索引
+      const lastEndSlot = Math.floor(lastEnd / ONE_HOUR);     // 上一个任务结束所在小时槽索引（可能是同一小时）
+      const crossedNewHour = startSlot > lastEndSlot;         // 只要进入了新的小时槽就算“合格”
 
-      if (noOverlap && spacedEnough){
+      if (noOverlap &&  (spacedEnough && crossedNewHour)){
         rows[i].push(task);
         task.rowIndex = i;
         placed = true;
@@ -454,7 +458,7 @@ tooltip:{
           const height = BAR_HEIGHT;
           const dotX = x1 + DOT_SHIFT_X;
           const textX = dotX + DOT_W/2 + 8;
-          const fillGrad = new echarts.graphic.LinearGradient(0,0,1,0,[{offset:0, color:'#3b82f6'},{offset:1, color:'#1e40af'}]);
+          const fillGrad = new echarts.graphic.LinearGradient(0,0,1,0,[{offset:0, color:'#3b82f6'},{offset:1, color:'#eceef8'}]);
           const needRedRing = isMustReview(base.must_review) && !t.reviewed;
           return {
             type:'group',
@@ -535,13 +539,15 @@ function makeArrows(scheduled){
   const arr = [];
   scheduled.forEach(t=>{
     const preds = Array.isArray(t.predecessor) ? t.predecessor : (t.predecessor ? [t.predecessor] : []);
-    preds.forEach((pname, idx)=>{
-      const src = scheduled.find(x=>x.name===pname);
+    preds.forEach((pid, idx)=>{
+      const src = scheduled.find(x=>x.id===pid);
       if(!src) return;
 
-      // 起终点像素坐标（尾→头）
-      const [srcX2, srcY] = myChart.convertToPixel({seriesIndex:0}, [+new Date(src.end), src.rowIndex]);
-      const [tgtX1, tgtY] = myChart.convertToPixel({seriesIndex:0}, [+new Date(t.start), t.rowIndex]);
+      // 起终点像素坐标（中→中）
+      const srcMidTime = (new Date(src.start).getTime() + new Date(src.end).getTime()) / 2;
+      const tgtMidTime = (new Date(t.start).getTime() + new Date(t.end).getTime()) / 2;
+      const [srcX2, srcY] = myChart.convertToPixel({seriesIndex:0}, [srcMidTime, src.rowIndex]);
+      const [tgtX1, tgtY] = myChart.convertToPixel({seriesIndex:0}, [tgtMidTime, t.rowIndex]);
 
       // —— 可选：平行位移，避免多条线完全重叠（仍保持直线，不拐）——
       let X1 = srcX2, Y1 = srcY, X2 = tgtX1, Y2 = tgtY;
@@ -765,8 +771,8 @@ function makeArrows(scheduled){
     }
   })();
 
-  // 每 60 秒移动“现在时间线”
-  setInterval(()=> rebuildGraphics(), 60000);
+  // 每 10 秒移动“现在时间线”
+  setInterval(()=> rebuildGraphics(), 10000);
   </script>
 </body>
 </html>
